@@ -1,70 +1,111 @@
 pipeline {
-    agent any
-
-    environment {
-        DOCKER_IMAGE = "joung1234/spring-jenkins"
-        SERVER_IP = "13.49.49.125"
-        CONTAINER_NAME = "spring-jenkins"
-    }
-
-    tools {
-        jdk 'jdk17'   // Jenkins 관리 > Tools > JDK installations 의 JDK Name 에 입력한 이름
-    }
-
-    stages {
-
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
-
-        stage('Build with Gradle') {
-            steps {
-                sh 'chmod +x ./gradlew'
-                sh './gradlew clean build'
-            }
-        }
-
-        stage('Docker Build & Push') {
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'dockerhub_info', // 반드시 Jenkins 설치시 New credentials 에서 Username with password 에서 입력하였던 ID 이름을 넣어야 함. 
-                    usernameVariable: 'DOCKER_USER', // Jenkins 내부에서 쓰는 환경 변수 이름이므로 그대로 써야함. 바꾸면 안됨. 
-                    passwordVariable: 'DOCKER_PASS'  // Jenkins 내부에서 쓰는 환경 변수 이름이므로 그대로 써야함. 바꾸면 안됨. 
-                )]) {
-
-                    sh '''
-                        echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin
-                        docker build -t $DOCKER_IMAGE:latest .
-                        docker push $DOCKER_IMAGE:latest
-                    '''
-                }
-            }
-        }
-
-        stage('Deploy to Server') {
-            steps {
-                sshagent(['SERVER_SSH_KEY']) {  // 반드시 Jenkins 설치시 New credentials 에서 SSH Username with private key 에서 입력하였던 ID 이름을 넣어야 함.
-                    sh """
-                        ssh -o StrictHostKeyChecking=no ubuntu@$SERVER_IP '
-                            docker stop $CONTAINER_NAME || true
-                            docker rm $CONTAINER_NAME || true
-                            docker pull $DOCKER_IMAGE:latest
-                            docker run -d --name $CONTAINER_NAME -p 9090:9090 $DOCKER_IMAGE:latest
-                        '
-                    """
-                }
-            }
-        }
-    }
-
-    post {
-        success {
-            echo "Deployment completed successfully."
-        }
-        failure {
-            echo "Deployment failed."
-        }
-    }
+	agent any
+	
+	// 전역변수 => ${SERVER_IP}
+	environment {
+			APP_DIR = "~/app"
+			JAR_NAME = "jenkins-0.0.1-SNAPSHOT.jar"
+	}
+		
+	stages {
+		/*
+			git push = commit
+			    |
+			web hooks / poll
+			    |
+			 jenkins (local)
+			    |
+			  build
+			    |
+			  docker build
+			  docker push
+			    |
+			  minikube
+			    | deployment.yaml update
+			  브라우저 실행
+		*/
+		/*
+		 연결 확인 = ngrok
+		 stage('Check Git Info') {
+			steps {
+				sh '''
+				    echo "===Git Info==="
+				    git branch
+				    git log -1
+				   '''
+			}
+		}*/
+		
+		// 감지 = main : push (commit)
+		stage('Check Out') {
+			steps {
+				 echo 'Git Checkout'
+                 checkout scm
+			}
+		}
+		
+		// gradle build => jar파일을 다시 생성 
+		stage('Gradle Permission') {
+			steps {
+				sh '''
+				    chmod +x gradlew
+				   '''
+			}
+		}
+		
+		// build 시작 
+		stage('Gradle Build') {
+			steps {
+				sh '''
+				    ./gradlew clean build
+				   '''
+			}
+		}
+		
+		// Docker Build  이미지명은 자신의 것으로 해야한다.
+		stage('Docker Build') {
+			steps {
+				sh '''
+					docker build -t joung1234/spring-jenkins .
+				   '''
+			}
+		}
+		
+		stage('Docker Login') {
+		  	steps {
+		   		 withCredentials([usernamePassword(
+		        	credentialsId: 'dockerhub_info',
+		       		usernameVariable: 'DH_USER',
+		        	passwordVariable: 'DH_PASS'
+		    )]) {
+		     	 sh '''
+		       		 echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
+		      		'''
+		    	}
+		  	}
+		}
+		
+		// Docker Push  이미지명은 자신의 것으로 해야한다. 
+		stage('Docker Push') {
+		  	steps {
+		    	sh '''
+		      		docker push joung1234/spring-jenkins:latest
+		    	'''
+		  	}
+		}
+		
+		// 실행 명령 
+		
+		stage('Deploy to MiniKube') {
+			steps {
+				sh '''
+					kubectl delete deployment myapp || true
+					sudo -u sist /usr/local/bin/kubectl apply -f /var/lib/jenkins/k8s/deployment.yaml
+					sudo -u sist /usr/local/bin/kubectl rollout restart deployment/myapp-deployment
+					sudo -u sist /usr/local/bin/kubectl rollout status deployment/myapp-deployment
+				   '''
+			}
+		}
+		
+	}
 }
